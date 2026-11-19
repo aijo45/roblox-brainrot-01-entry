@@ -8,6 +8,14 @@ They stand in for Roblox Studio captures, which this Linux machine
 cannot take; replace them with real Studio captures before submitting
 if Studio is available. 1-thumbnail.jpg is the cover: it is also the
 picture to upload as the experience's first thumbnail on Roblox.
+
+Four shots, matching the four moments the judge is shown: thumbnail
+(the bay at a glance), play (buying on the belt), base (a full base,
+locked), wave (the red wall sweeping while a player stands safe).
+The HUD states follow the client: the wave line reads SWEEP ACTIVE
+with seconds left during a sweep, and the lock button shows its
+remaining seconds while active. The shop ladder lists all thirteen
+characters, The Last Brain Cell included.
 """
 import os
 from PIL import Image, ImageDraw, ImageFont
@@ -144,6 +152,7 @@ def shop_panel(d):
         ("Grandma Rocket", "$4K  •  $100/s", GOLD),
         ("Toilet Tornado", "$7K  •  $160/s", GOLD),
         ("CEO of Naps", "$20K  •  $400/s", PINK),
+        ("The Last Brain Cell", "$28K  •  $550/s", PINK),
         ("Infinite Sandwich", "$35K  •  $650/s", PINK),
         ("The Algorithm", "$100K  •  $2K/s", RED),
         ("Skibidi Supreme", "$250K  •  $5K/s", RED),
@@ -208,7 +217,7 @@ def base():
         brainrot(d, x, y, 0.7, body, head, name, "", rate, WHITE)
     player_figure(d, 1000, 620, 1.0)
     draw_hud(d, "$12,450", "320", "2  (x2.0)", "42s")
-    draw_bottom_bar(d, lock="LOCKED", rebirth="REBIRTH! (R)")
+    draw_bottom_bar(d, lock="LOCKED 12s", rebirth="REBIRTH! (R)")
     d.rounded_rectangle([W // 2 - 300, 18, W // 2 + 300, 66], radius=14, fill=(15, 15, 30))
     text_center(d, W // 2, 28, "BASE LOCKED — NOBODY CAN STEAL!", font(24), (120, 200, 255))
     return img
@@ -228,7 +237,7 @@ def wave():
     player_figure(d, 190, 400, 1.2)
     label_text(d, 190, 272, "SAFE ON BASE!", font(18), GOLD)
     player_figure(d, 850, 600, 1.2)
-    draw_hud(d, "$8,900", "210", "2  (x2.0)", "3s!", "CARRYING — DASH HOME!")
+    draw_hud(d, "$8,900", "210", "2  (x2.0)", "SWEEP 3s!", "CARRYING — DASH HOME!")
     draw_bottom_bar(d)
     d.rounded_rectangle([W // 2 - 340, 18, W // 2 + 340, 66], radius=14, fill=(255, 60, 120))
     text_center(d, W // 2, 28, "⚠ MEME WAVE IS HERE! STAY ON YOUR BASE!", font(24), WHITE)

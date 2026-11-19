@@ -65,7 +65,7 @@ local shop = Instance.new("Frame")
 shop.Name = "ShopLadder"
 shop.AnchorPoint = Vector2.new(0, 0)
 shop.Position = UDim2.new(0, 12, 0, 60)
-shop.Size = UDim2.fromOffset(300, 460)
+shop.Size = UDim2.fromOffset(300, 540)
 shop.BackgroundColor3 = Color3.fromRGB(15, 15, 30)
 shop.BackgroundTransparency = 0.25
 shop.BorderSizePixel = 0
@@ -105,7 +105,7 @@ for _, character in ipairs(BrainrotData.CHARACTERS) do
 	sub.Position = UDim2.new(0, 12, 0, y + 20)
 	sub.Size = UDim2.fromOffset(276, 16)
 	sub.Parent = shop
-	y = y + 38
+	y = y + 36
 end
 
 -- Bottom bar: base lock, rebirth, and the hint line.
@@ -259,7 +259,12 @@ hudUpdate.OnClientEvent:Connect(function(data)
 	rateLabel.Text = "+" .. BrainrotData.formatMoney(data.rate) .. "/s"
 	rebirthLabel.Text = "REBIRTHS  " .. tostring(data.rebirths)
 		.. "  (x" .. string.format("%.1f", 1 + BrainrotData.REBIRTH_BONUS_PER * data.rebirths) .. ")"
-	if data.waveIn <= 10 then
+	-- Wave: sweep in progress reads as its own state, with the seconds
+	-- left in the sweep; calm/warn count down to the next wave.
+	if data.wavePhase == "sweep" then
+		waveLabel.Text = "⚠ SWEEP ACTIVE  " .. tostring(math.max(0, math.ceil(data.waveSecs or 0))) .. "s!"
+		waveLabel.TextColor3 = Color3.fromRGB(255, 60, 80)
+	elseif data.waveIn <= 10 then
 		waveLabel.Text = "⚠ MEME WAVE  " .. tostring(math.max(0, math.ceil(data.waveIn))) .. "s!"
 		waveLabel.TextColor3 = Color3.fromRGB(255, 60, 80)
 	else
@@ -272,8 +277,16 @@ hudUpdate.OnClientEvent:Connect(function(data)
 	else
 		carryLabel.Text = ""
 	end
+	-- Hint follows progress: buy first, then run home, then defend.
+	if data.carrying then
+		hintLabel.Text = "DASH it home to your base!"
+	elseif data.rate > 0 then
+		hintLabel.Text = "Lock your base (L) or tag thieves!"
+	else
+		hintLabel.Text = "Touch a brainrot on the belt to buy it!"
+	end
 	if data.lockActive then
-		lockButton.Text = "🔒 LOCKED"
+		lockButton.Text = "🔒 LOCKED " .. tostring(math.ceil(data.lockLeft or 0)) .. "s"
 	else
 		lockButton.Text = "🔒 LOCK BASE (L)"
 	end

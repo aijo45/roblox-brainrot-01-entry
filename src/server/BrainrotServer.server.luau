@@ -1,12 +1,17 @@
 -- BrainrotServer: the whole Brainrot Bay game loop, server side.
--- Builds the 3D world at runtime, spawns brainrots on the conveyor,
--- pays $/s for every brainrot on a player's base, and runs the stealing,
--- the Meme Wave and rebirths. The client only draws the HUD; every
--- number that matters lives here.
+-- Builds the 3D bay at runtime, walks brainrots down the conveyor,
+-- pays $/s for every brainrot on a player's base, and runs stealing,
+-- the Meme Wave, rebirths, DataStore saves and one brainrot-recovery
+-- path. The client only draws the HUD; every number that matters
+-- lives here. A catch is never silently lost: a stolen brainrot goes
+-- home to its owner when the thief is tagged, swept or leaves, and a
+-- bought one runs off back onto the conveyor.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local DataStoreService = game:GetService("DataStoreService")
 
 local BrainrotData = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("BrainrotData"))
 
@@ -22,6 +27,8 @@ local LOCK_SECONDS = 20
 local LOCK_COOLDOWN = 60
 local START_CASH = 100
 local PLOT_COUNT = 8
+local SAVE_EVERY = 60 -- seconds between autosaves
+local REMOTE_DEBOUNCE = 2 -- seconds between lock/rebirth requests
 
 -- The Meme Wave clock. Declared up here so sendHud (below) can read it:
 -- a local declared after a function is invisible inside that function.
@@ -29,6 +36,43 @@ local waveCountdown = WAVE_EVERY
 local wavePhase = "calm" -- calm -> warn -> sweep
 local waveTimer = 0
 local waveZ = -130
+
+-- Saves ------------------------------------------------------------------
+-- GetDataStore throws in Studio when API access is off, so a dead
+-- store must never take the game down with it: persistence is simply
+-- off then, and no save ever runs.
+local saveStore = nil
+pcall(function()
+	saveStore = DataStoreService:GetDataStore("BrainrotBaySaveV1")
+end)
+
+local function loadSave(player)
+	if not saveStore then
+		return nil, false
+	end
+	local ok, data = pcall(function()
+		return saveStore:GetAsync("player_" .. player.UserId)
+	end)
+	if not ok then
+		return nil, false
+	end
+	return data, true
+end
+
+-- Never save a player whose load failed: overwriting their real save
+-- with fresh defaults would erase their progress for good.
+local function saveData(player, state)
+	if not saveStore or not state or not state.dataLoaded then
+		return
+	end
+	local key = "player_" .. player.UserId
+	local cash, earned, rebirths = state.cash, state.earned, state.rebirths
+	pcall(function()
+		saveStore:UpdateAsync(key, function()
+			return { cash = cash, earned = earned, rebirths = rebirths }
+		end)
+	end)
+end
 
 -- Remotes ----------------------------------------------------------------
 local hudUpdate = Instance.new("RemoteEvent")
@@ -48,8 +92,6 @@ requestRebirth.Name = "RequestRebirth"
 requestRebirth.Parent = ReplicatedStorage
 
 -- World ------------------------------------------------------------------
-local workspace = game:GetService("Workspace")
-
 local function newPart(name, size, position, color, material)
 	local part = Instance.new("Part")
 	part.Name = name
@@ -59,7 +101,7 @@ local function newPart(name, size, position, color, material)
 	part.Material = material or Enum.Material.SmoothPlastic
 	part.Anchored = true
 	part.CanCollide = true
-	part.Parent = workspace
+	part.Parent = Workspace
 	return part
 end
 
@@ -69,7 +111,7 @@ local conveyor = newPart("Conveyor", Vector3.new(10, 0.5, 220), Vector3.new(0, 0
 	Color3.fromRGB(45, 45, 60), Enum.Material.Slate)
 conveyor.CanCollide = false
 
-local function newBeltStripe(z)
+for z = -100, 100, 20 do
 	local stripe = Instance.new("Part")
 	stripe.Name = "BeltStripe"
 	stripe.Size = Vector3.new(10, 0.1, 2)
@@ -78,11 +120,7 @@ local function newBeltStripe(z)
 	stripe.Material = Enum.Material.Neon
 	stripe.Anchored = true
 	stripe.CanCollide = false
-	stripe.Parent = workspace
-	return stripe
-end
-for z = -100, 100, 20 do
-	newBeltStripe(z)
+	stripe.Parent = Workspace
 end
 
 -- The north and south gates the brainrots walk through.
@@ -121,7 +159,7 @@ local PLOT_COLORS = {
 	Color3.fromRGB(120, 220, 230), Color3.fromRGB(255, 170, 90),
 }
 
-local plots = {} -- [plotIndex] = { center, color, owner, pedestals, sign }
+local plots = {} -- [plotIndex] = { center, color, owner, lockUntil, pedestals, signText }
 
 local function buildPlot(index)
 	local center = PLOT_CENTERS[index]
@@ -168,7 +206,7 @@ local function buildPlot(index)
 	end
 
 	plots[index] = {
-		center = center, color = color, owner = nil,
+		center = center, color = color, owner = nil, lockUntil = 0,
 		platform = platform, pedestals = pedestals, signText = signText,
 	}
 end
@@ -188,7 +226,7 @@ local function newTree(x, z)
 	leaves.Color = Color3.fromRGB(60, 180, 80)
 	leaves.Material = Enum.Material.Grass
 	leaves.Anchored = true
-	leaves.Parent = workspace
+	leaves.Parent = Workspace
 	return trunk
 end
 newTree(-30, -95)
@@ -209,10 +247,12 @@ waveWall.Material = Enum.Material.Neon
 waveWall.Transparency = 0.4
 waveWall.Anchored = true
 waveWall.CanCollide = false
-waveWall.Parent = workspace
+waveWall.Parent = Workspace
 
 -- Player state -----------------------------------------------------------
-local playerState = {} -- [player] = { cash, earned, rebirths, plot, carrying, lockUntil, lockReadyAt }
+-- [player] = { cash, earned, rebirths, plot, carrying, lockUntil,
+--   lockReadyAt, lockRequestAt, rebirthRequestAt, dataLoaded }
+local playerState = {}
 
 local function playerRate(state)
 	local total = 0
@@ -225,6 +265,18 @@ local function playerRate(state)
 		end
 	end
 	return total * (1 + BrainrotData.REBIRTH_BONUS_PER * state.rebirths)
+end
+
+-- Seconds left in the current wave phase: calm/warn count down to the
+-- next phase, sweep counts down to the wall leaving the map.
+local function waveSeconds()
+	if wavePhase == "sweep" then
+		return math.max(0, (130 - waveZ) / (260 / WAVE_SWEEP))
+	elseif wavePhase == "warn" then
+		return math.max(0, WAVE_WARN - waveTimer)
+	else
+		return math.max(0, waveCountdown)
+	end
 end
 
 local function sendHud(player)
@@ -240,9 +292,12 @@ local function sendHud(player)
 		plot = state.plot or 0,
 		carrying = state.carrying ~= nil,
 		lockActive = tick() < state.lockUntil,
+		lockLeft = math.max(0, state.lockUntil - tick()),
 		lockReadyIn = math.max(0, state.lockReadyAt - tick()),
 		rebirthGoal = BrainrotData.REBIRTH_CASH_GOAL,
 		waveIn = waveCountdown,
+		wavePhase = wavePhase,
+		waveSecs = waveSeconds(),
 	})
 end
 
@@ -253,15 +308,19 @@ local function sendAllHud()
 end
 
 -- Brainrot models --------------------------------------------------------
+-- Placed brainrots grow a little with their rarity tier (Common 1.0x
+-- up to Brainrot God 1.3x), so the ladder is visible at a glance, and
+-- a Golden or better mutation gets a thin neon trim in its own color.
 local function buildBrainrotModel(character, mutationIndex)
 	local rarity = BrainrotData.RARITIES[character.rarity]
 	local mutation = BrainrotData.MUTATIONS[mutationIndex]
+	local s = 1 + (character.rarity - 1) * 0.06
 	local model = Instance.new("Model")
 	model.Name = character.name
 
 	local body = Instance.new("Part")
 	body.Name = "Body"
-	body.Size = Vector3.new(3, 3, 2)
+	body.Size = Vector3.new(3 * s, 3 * s, 2 * s)
 	body.Color = character.body
 	body.Material = Enum.Material.SmoothPlastic
 	body.Anchored = true
@@ -269,8 +328,8 @@ local function buildBrainrotModel(character, mutationIndex)
 
 	local head = Instance.new("Part")
 	head.Name = "Head"
-	head.Size = Vector3.new(2.6, 2.4, 2.2)
-	head.Position = Vector3.new(0, 2.7, 0)
+	head.Size = Vector3.new(2.6 * s, 2.4 * s, 2.2 * s)
+	head.Position = Vector3.new(0, 2.7 * s, 0)
 	head.Color = character.head
 	head.Material = Enum.Material.SmoothPlastic
 	head.Anchored = true
@@ -279,17 +338,28 @@ local function buildBrainrotModel(character, mutationIndex)
 	for _, side in ipairs({ -0.7, 0.7 }) do
 		local eye = Instance.new("Part")
 		eye.Name = "Eye"
-		eye.Size = Vector3.new(0.5, 0.7, 0.2)
-		eye.Position = Vector3.new(side, 2.9, 1.15)
+		eye.Size = Vector3.new(0.5 * s, 0.7 * s, 0.2 * s)
+		eye.Position = Vector3.new(side * s, 2.9 * s, 1.15 * s)
 		eye.Color = Color3.fromRGB(20, 20, 30)
 		eye.Anchored = true
 		eye.Parent = model
 	end
 
+	if mutationIndex > 1 then
+		local trim = Instance.new("Part")
+		trim.Name = "MutationTrim"
+		trim.Size = Vector3.new(3.4 * s, 0.3, 2.4 * s)
+		trim.Position = Vector3.new(0, -1.6 * s, 0)
+		trim.Color = mutation.color
+		trim.Material = Enum.Material.Neon
+		trim.Anchored = true
+		trim.Parent = model
+	end
+
 	local label = Instance.new("BillboardGui")
 	label.Name = "BrainrotLabel"
 	label.Size = UDim2.fromOffset(220, 72)
-	label.StudsOffset = Vector3.new(0, 5.2, 0)
+	label.StudsOffset = Vector3.new(0, 5.2 * s, 0)
 	label.AlwaysOnTop = true
 	label.Parent = head
 
@@ -333,8 +403,80 @@ local function buildBrainrotModel(character, mutationIndex)
 	return model
 end
 
+local function freePedestal(plotIndex)
+	for _, ped in ipairs(plots[plotIndex].pedestals) do
+		if not ped.taken then
+			return ped
+		end
+	end
+	return nil
+end
+
 -- Walking brainrots ------------------------------------------------------
-local walkers = {} -- [model] = { character, mutation, rate, price, touched }
+-- walkers is keyed by Model, so #walkers is 0 forever; the cap runs on
+-- an explicit counter that rises on every spawn and falls on every
+-- buy and despawn.
+local walkers = {} -- [model] = { character, mutation, rate, price, cooldown }
+local walkerCount = 0
+
+local function buyWalker(player, model, entry)
+	local state = playerState[player]
+	if not state or state.carrying or not walkers[model] then
+		return
+	end
+	if state.cash < entry.price then
+		notify:FireClient(player, "Need " .. BrainrotData.formatMoney(entry.price)
+			.. " for " .. entry.character.name .. " — you have " .. BrainrotData.formatMoney(state.cash))
+		return
+	end
+	state.cash = state.cash - entry.price
+	walkers[model] = nil
+	walkerCount = walkerCount - 1
+	model:Destroy()
+	state.carrying = {
+		character = entry.character,
+		mutation = entry.mutation,
+		rate = entry.rate,
+		price = entry.price,
+		owner = player, -- the player it was bought by; stealing changes this
+		stolen = false,
+	}
+	-- The carried brainrot rides above the player's head, built fresh so
+	-- its label follows the player around the map.
+	state.carrying.model = buildBrainrotModel(entry.character, entry.mutation)
+	state.carrying.model.Parent = Workspace
+	notify:FireClient(player, "Caught " .. entry.character.name .. "! Dash it home to your base!")
+	sendHud(player)
+	print(("Brainrot Bay: %s bought %s for %d"):format(player.Name, entry.character.name, entry.price))
+end
+
+local function spawnWalkerModel(character, mutation)
+	local model = buildBrainrotModel(character, mutation)
+	model:PivotTo(CFrame.new(0, 2.5, -CONVEYOR_HALF))
+	model.Parent = Workspace
+	local entry = {
+		character = character,
+		mutation = mutation,
+		rate = BrainrotData.rateOf(character, mutation),
+		price = BrainrotData.priceOf(character, mutation),
+		cooldown = 0,
+	}
+	walkers[model] = entry
+	walkerCount = walkerCount + 1
+
+	model.PrimaryPart.Touched:Connect(function(hit)
+		if tick() < entry.cooldown then
+			return
+		end
+		local player = Players:GetPlayerFromCharacter(hit.Parent)
+		if not player then
+			return
+		end
+		entry.cooldown = tick() + 0.5
+		buyWalker(player, model, entry)
+	end)
+	return model, entry
+end
 
 local function pickCharacter()
 	-- Weight the roll toward cheap characters: rarity 1 is common, the
@@ -364,108 +506,14 @@ local function pickCharacter()
 end
 
 local function spawnWalker()
-	if #walkers >= WALKER_MAX then
+	if walkerCount >= WALKER_MAX then
 		return
 	end
-	local character = pickCharacter()
-	local mutation = BrainrotData.rollMutation()
-	local model = buildBrainrotModel(character, mutation)
-	model:PivotTo(CFrame.new(0, 2.5, -CONVEYOR_HALF))
-	model.Parent = workspace
-	local entry = {
-		character = character,
-		mutation = mutation,
-		rate = BrainrotData.rateOf(character, mutation),
-		price = BrainrotData.priceOf(character, mutation),
-		cooldown = 0,
-	}
-	walkers[model] = entry
-
-	model.PrimaryPart.Touched:Connect(function(hit)
-		if tick() < entry.cooldown then
-			return
-		end
-		local player = Players:GetPlayerFromCharacter(hit.Parent)
-		if not player then
-			return
-		end
-		entry.cooldown = tick() + 0.5
-		buyWalker(player, model, entry)
-	end)
+	spawnWalkerModel(pickCharacter(), BrainrotData.rollMutation())
 end
 
-function buyWalker(player, model, entry)
-	local state = playerState[player]
-	if not state or state.carrying or not walkers[model] then
-		return
-	end
-	if state.cash < entry.price then
-		notify:FireClient(player, "Need " .. BrainrotData.formatMoney(entry.price)
-			.. " for " .. entry.character.name .. " — you have " .. BrainrotData.formatMoney(state.cash))
-		return
-	end
-	state.cash = state.cash - entry.price
-	walkers[model] = nil
-	model.Parent = nil
-	model:Destroy()
-	state.carrying = {
-		character = entry.character,
-		mutation = entry.mutation,
-		rate = entry.rate,
-		price = entry.price,
-		owner = player, -- the player it was bought by; stealing changes this
-		stolen = false,
-	}
-	-- The carried brainrot rides above the player's head, built fresh so
-	-- its label follows the player around the map.
-	state.carrying.model = buildBrainrotModel(entry.character, entry.mutation)
-	state.carrying.model.Parent = workspace
-	notify:FireClient(player, "Caught " .. entry.character.name .. "! Dash it home to your base!")
-	sendHud(player)
-	print(("Brainrot Bay: %s bought %s for %d"):format(player.Name, entry.character.name, entry.price))
-end
-
--- Placing, stealing and dropping -----------------------------------------
-local function freePedestal(plotIndex)
-	for _, ped in ipairs(plots[plotIndex].pedestals) do
-		if not ped.taken then
-			return ped
-		end
-	end
-	return nil
-end
-
-local function placeCarried(player)
-	local state = playerState[player]
-	if not state or not state.carrying or not state.plot then
-		return
-	end
-	local ped = freePedestal(state.plot)
-	if not ped then
-		notify:FireClient(player, "Your base is full! Rebirth or make room first.")
-		return
-	end
-	local carried = state.carrying
-	ped.taken = true
-	ped.brainrot = { character = carried.character, mutation = carried.mutation, rate = carried.rate, owner = player }
-	local model = buildBrainrotModel(carried.character, carried.mutation)
-	model:PivotTo(CFrame.new(ped.part.Position.X, ped.part.Position.Y + 3.2, ped.part.Position.Z))
-	model.Parent = workspace
-	ped.brainrot.model = model
-	-- Touching a placed brainrot is how another player steals it.
-	model.PrimaryPart.Touched:Connect(function(hit)
-		stealBrainrot(hit, state.plot, ped)
-	end)
-	if carried.model then
-		carried.model:Destroy()
-	end
-	state.carrying = nil
-	notify:FireClient(player, carried.character.name .. " is on your base, earning "
-		.. BrainrotData.formatMoney(carried.rate) .. "/s!")
-	sendHud(player)
-end
-
-function stealBrainrot(hit, plotIndex, ped)
+-- Stealing and recovery --------------------------------------------------
+local function stealBrainrot(hit, plotIndex, ped)
 	local thief = Players:GetPlayerFromCharacter(hit.Parent)
 	if not thief or not ped.taken or not ped.brainrot then
 		return
@@ -498,7 +546,7 @@ function stealBrainrot(hit, plotIndex, ped)
 		stolen = true,
 	}
 	thiefState.carrying.model = buildBrainrotModel(stolen.character, stolen.mutation)
-	thiefState.carrying.model.Parent = workspace
+	thiefState.carrying.model.Parent = Workspace
 	notify:FireClient(thief, "You stole " .. stolen.character.name .. "! RUN it to your base before "
 		.. owner.Name .. " tags you!")
 	if owner and owner.Parent then
@@ -508,37 +556,88 @@ function stealBrainrot(hit, plotIndex, ped)
 	sendHud(thief)
 end
 
--- A tagged thief drops the stolen brainrot: it snaps back to its owner's
--- first free pedestal, or walks off on the conveyor if the base is full.
+-- The one recovery path. A carried brainrot goes home to its owner's
+-- first free pedestal; with no room, or no owner left, it runs off
+-- down the conveyor for anyone to catch. Idempotent: a second call
+-- with the same carried table is a no-op, so tag, wave and leave can
+-- all funnel through it without ever duplicating a brainrot.
+local function recoverBrainrot(carried)
+	if not carried or carried.recovered then
+		return
+	end
+	carried.recovered = true
+	if carried.model then
+		carried.model:Destroy()
+		carried.model = nil
+	end
+	local owner = carried.owner
+	local ownerState = owner and playerState[owner]
+	if ownerState and ownerState.plot then
+		local ped = freePedestal(ownerState.plot)
+		if ped then
+			ped.taken = true
+			ped.brainrot = { character = carried.character, mutation = carried.mutation, rate = carried.rate, owner = owner }
+			local model = buildBrainrotModel(carried.character, carried.mutation)
+			model:PivotTo(CFrame.new(ped.part.Position.X, ped.part.Position.Y + 3.2, ped.part.Position.Z))
+			model.Parent = Workspace
+			ped.brainrot.model = model
+			model.PrimaryPart.Touched:Connect(function(hit)
+				stealBrainrot(hit, ownerState.plot, ped)
+			end)
+			if owner and owner.Parent then
+				notify:FireClient(owner, "Your " .. carried.character.name .. " is safe back on your base.")
+				sendHud(owner)
+			end
+			return
+		end
+	end
+	spawnWalkerModel(carried.character, carried.mutation)
+	if owner and owner.Parent then
+		notify:FireClient(owner, carried.character.name .. " ran off down the conveyor!")
+	end
+end
+
+local function placeCarried(player)
+	local state = playerState[player]
+	if not state or not state.carrying or not state.plot then
+		return
+	end
+	local ped = freePedestal(state.plot)
+	if not ped then
+		notify:FireClient(player, "Your base is full! Rebirth or make room first.")
+		return
+	end
+	local carried = state.carrying
+	ped.taken = true
+	ped.brainrot = { character = carried.character, mutation = carried.mutation, rate = carried.rate, owner = player }
+	local model = buildBrainrotModel(carried.character, carried.mutation)
+	model:PivotTo(CFrame.new(ped.part.Position.X, ped.part.Position.Y + 3.2, ped.part.Position.Z))
+	model.Parent = Workspace
+	ped.brainrot.model = model
+	-- Touching a placed brainrot is how another player steals it.
+	model.PrimaryPart.Touched:Connect(function(hit)
+		stealBrainrot(hit, state.plot, ped)
+	end)
+	if carried.model then
+		carried.model:Destroy()
+	end
+	state.carrying = nil
+	notify:FireClient(player, carried.character.name .. " is on your base, earning "
+		.. BrainrotData.formatMoney(carried.rate) .. "/s!")
+	sendHud(player)
+end
+
+-- A tagged thief drops the stolen brainrot: it goes home through the
+-- single recovery path, never just vanishes.
 local function dropStolen(thief)
 	local state = playerState[thief]
 	if not state or not state.carrying or not state.carrying.stolen then
 		return
 	end
 	local carried = state.carrying
-	if carried.model then
-		carried.model:Destroy()
-	end
 	state.carrying = nil
-	local ownerState = playerState[carried.owner]
-	if ownerState and ownerState.plot then
-		local ped = freePedestal(ownerState.plot)
-		if ped then
-			ped.taken = true
-			ped.brainrot = { character = carried.character, mutation = carried.mutation, rate = carried.rate, owner = carried.owner }
-			local model = buildBrainrotModel(carried.character, carried.mutation)
-			model:PivotTo(CFrame.new(ped.part.Position.X, ped.part.Position.Y + 3.2, ped.part.Position.Z))
-			model.Parent = workspace
-			ped.brainrot.model = model
-			model.PrimaryPart.Touched:Connect(function(hit)
-				stealBrainrot(hit, ownerState.plot, ped)
-			end)
-			notify:FireClient(carried.owner, "You got " .. carried.character.name .. " back! It is safe on your base.")
-			sendHud(carried.owner)
-			return
-		end
-	end
-	notify:FireClient(thief, "Dropped " .. carried.character.name .. " — it ran off down the conveyor!")
+	notify:FireClient(thief, "Dropped " .. carried.character.name .. " — it ran home!")
+	recoverBrainrot(carried)
 end
 
 -- The Meme Wave ----------------------------------------------------------
@@ -567,18 +666,14 @@ local function sweepWave(dt)
 		if character then
 			local root = character:FindFirstChild("HumanoidRootPart")
 			if root and root.Position.Z < waveZ + 2 and not onOwnBase(player) then
-				-- Swept away: back to spawn, and anything carried is lost.
+				-- Swept away: back to spawn, and anything carried runs
+				-- home through recovery instead of vanishing.
 				local state = playerState[player]
 				if state and state.carrying then
-					if state.carrying.stolen then
-						dropStolen(player)
-					else
-						if state.carrying.model then
-							state.carrying.model:Destroy()
-						end
-						state.carrying = nil
-						notify:FireClient(player, "The Meme Wave swept you away — you dropped your brainrot!")
-					end
+					local carried = state.carrying
+					state.carrying = nil
+					notify:FireClient(player, "The Meme Wave swept you away — your brainrot ran home!")
+					recoverBrainrot(carried)
 				end
 				character:PivotTo(CFrame.new(0, 3, 115))
 				sendHud(player)
@@ -598,6 +693,10 @@ requestLock.OnServerEvent:Connect(function(player)
 	if not state or not state.plot then
 		return
 	end
+	if tick() - state.lockRequestAt < REMOTE_DEBOUNCE then
+		return
+	end
+	state.lockRequestAt = tick()
 	if tick() < state.lockReadyAt then
 		notify:FireClient(player, "Base lock recharging: " .. math.ceil(state.lockReadyAt - tick()) .. "s left.")
 		return
@@ -614,6 +713,10 @@ requestRebirth.OnServerEvent:Connect(function(player)
 	if not state then
 		return
 	end
+	if tick() - state.rebirthRequestAt < REMOTE_DEBOUNCE then
+		return
+	end
+	state.rebirthRequestAt = tick()
 	if state.earned < BrainrotData.REBIRTH_CASH_GOAL then
 		notify:FireClient(player, "Rebirth needs " .. BrainrotData.formatMoney(BrainrotData.REBIRTH_CASH_GOAL)
 			.. " total earned — you are at " .. BrainrotData.formatMoney(state.earned))
@@ -655,15 +758,25 @@ local function claimPlot(player)
 end
 
 Players.PlayerAdded:Connect(function(player)
+	local saved, loaded = loadSave(player)
+	local cash, earned, rebirths = START_CASH, 0, 0
+	if loaded and type(saved) == "table" then
+		cash = tonumber(saved.cash) or START_CASH
+		earned = tonumber(saved.earned) or 0
+		rebirths = tonumber(saved.rebirths) or 0
+	end
 	local plotIndex = claimPlot(player)
 	playerState[player] = {
-		cash = START_CASH,
-		earned = 0,
-		rebirths = 0,
+		cash = cash,
+		earned = earned,
+		rebirths = rebirths,
 		plot = plotIndex,
 		carrying = nil,
 		lockUntil = 0,
 		lockReadyAt = 0,
+		lockRequestAt = 0,
+		rebirthRequestAt = 0,
+		dataLoaded = loaded,
 	}
 	if plotIndex then
 		notify:FireClient(player, "Welcome to Brainrot Bay! Your base is plot #" .. plotIndex
@@ -680,8 +793,20 @@ Players.PlayerRemoving:Connect(function(player)
 	if not state then
 		return
 	end
-	if state.carrying and state.carrying.model then
-		state.carrying.model:Destroy()
+	saveData(player, state)
+	if state.carrying then
+		local carried = state.carrying
+		state.carrying = nil
+		if carried.stolen then
+			-- The victim gets their brainrot back through recovery.
+			recoverBrainrot(carried)
+		else
+			-- A bought catch runs off back onto the conveyor.
+			if carried.model then
+				carried.model:Destroy()
+			end
+			spawnWalkerModel(carried.character, carried.mutation)
+		end
 	end
 	if state.plot then
 		local plot = plots[state.plot]
@@ -697,6 +822,13 @@ Players.PlayerRemoving:Connect(function(player)
 		plot.signText.Text = "EMPTY BASE"
 	end
 	playerState[player] = nil
+end)
+
+-- Save everyone if the server shuts down; autosave covers the rest.
+game:BindToClose(function()
+	for player, state in pairs(playerState) do
+		saveData(player, state)
+	end
 end)
 
 -- Tagging: touching a thief who carries YOUR brainrot makes them drop it.
@@ -723,9 +855,10 @@ RunService.Heartbeat:Connect(function(dt)
 	end
 end)
 
--- Main loop: spawn walkers, pay income, run the wave clock.
+-- Main loop: spawn walkers, pay income, run the wave clock, autosave.
 local spawnTimer = 0
 local incomeTimer = 0
+local saveTimer = 0
 local lastHud = 0
 
 RunService.Heartbeat:Connect(function(dt)
@@ -741,6 +874,7 @@ RunService.Heartbeat:Connect(function(dt)
 		local nextZ = cf.Position.Z + WALK_SPEED * dt
 		if nextZ > CONVEYOR_HALF then
 			walkers[model] = nil
+			walkerCount = walkerCount - 1
 			model:Destroy()
 		else
 			model:PivotTo(CFrame.new(cf.Position.X, cf.Position.Y, nextZ))
@@ -765,6 +899,15 @@ RunService.Heartbeat:Connect(function(dt)
 				state.cash = state.cash + rate
 				state.earned = state.earned + rate
 			end
+		end
+	end
+
+	-- Autosave every minute; a failed load never writes defaults.
+	saveTimer = saveTimer + dt
+	if saveTimer >= SAVE_EVERY then
+		saveTimer = 0
+		for player, state in pairs(playerState) do
+			saveData(player, state)
 		end
 	end
 
@@ -795,4 +938,4 @@ RunService.Heartbeat:Connect(function(dt)
 	end
 end)
 
-print("Brainrot Bay server ready: 12 brainrots, 6 rarities, 8 bases, Meme Wave every " .. WAVE_EVERY .. "s.")
+print("Brainrot Bay server ready: 13 brainrots, 6 rarities, 8 bases, Meme Wave every " .. WAVE_EVERY .. "s.")

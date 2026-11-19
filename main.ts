@@ -57,6 +57,14 @@ if (existsSync(shotsDir)) {
 	}
 }
 
+// The gate's place_file row refuses a place past 32 MiB, so check the
+// file before copying it in rather than handing the grader a dead run.
+const placePath = join(repoRoot, 'game.rbxl');
+const placeSize = statSync(placePath).size;
+if (placeSize > 32 * 1024 * 1024) {
+	throw new Error(`Brainrot Bay: game.rbxl is ${placeSize} bytes, over the 32 MiB place_file cap`);
+}
+
 copyFileSync(join(repoRoot, 'game.rbxl'), join(outDir, 'game.rbxl'));
 copyFileSync(join(repoRoot, 'PLAY.json'), join(outDir, 'PLAY.json'));
 copyTreeSkippingDotfiles(join(repoRoot, 'src'), join(outDir, 'src'));

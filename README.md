@@ -9,7 +9,7 @@ to steal them and a Meme Wave sweeps the map.
 
 ## The cast
 
-Twelve original characters across six rarities, each with a name, a
+Thirteen original characters across six rarities, each with a name, a
 quirk, a buy price and a $/s rate (see `src/shared/BrainrotData.luau`):
 
 | Rarity | Characters | $/s (base) |
@@ -18,7 +18,7 @@ quirk, a buy price and a $/s rate (see `src/shared/BrainrotData.luau`):
 | Rare | Captain Pickle, DJ Toaster | 6–10 |
 | Epic | Professor Banana, Couch Potato King | 25–40 |
 | Legendary | Grandma Rocket, Toilet Tornado | 100–160 |
-| Mythic | CEO of Naps, Infinite Sandwich | 400–650 |
+| Mythic | CEO of Naps, The Last Brain Cell, Infinite Sandwich | 400–650 |
 | Brainrot God | The Algorithm, Skibidi Supreme | 2,000–5,000 |
 
 Mutations roll on spawn — Golden (x2, 8%), Diamond (x5, 3%), Rainbow
@@ -34,12 +34,19 @@ Mutations roll on spawn — Golden (x2, 8%), Diamond (x5, 3%), Rainbow
 3. **Steal** — touch another player's placed brainrot to steal it and
    run it to your base. The owner can tag you to make you drop it.
    Lock your base for 20s with the LOCK button or the L key (60s
-   cooldown).
+   cooldown). A stolen brainrot is never lost: tagged, swept or
+   abandoned, it goes home to its owner's base through one recovery
+   path, or runs back onto the conveyor if the base is full.
 4. **Survive the Meme Wave** — every 100s a red wall sweeps the map.
    Only your own base platform is safe; anyone caught outside is swept
    back to spawn and drops what they carry.
 5. **Rebirth** — at $50,000 total earned, rebirth (R key or the button)
    resets cash and brainrots for +50% earnings, stacking each time.
+
+Cash, total earned and rebirths save to a DataStore (autosave every
+60s, on leave and on shutdown), and a load failure never overwrites
+an old save with fresh defaults. Placed brainrots grow slightly with
+their rarity tier, and Golden or better mutations carry a neon trim.
 
 The HUD (top right, clear of Roblox's own buttons) shows cash, $/s,
 rebirths and the wave countdown; the left panel shows the whole rarity

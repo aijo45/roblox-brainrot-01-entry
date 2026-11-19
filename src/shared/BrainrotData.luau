@@ -26,9 +26,10 @@ BrainrotData.MUTATIONS = {
 	{ name = "Rainbow", chance = 0.01, multiplier = 10, color = Color3.fromRGB(255, 120, 255) },
 }
 
--- The cast: twelve absurd, meme-born characters of our own. cost is the
+-- The cast: thirteen absurd, meme-born characters of our own. cost is the
 -- buy price in cash; baseRate is the $/s before rarity and mutation.
--- Two per rarity tier, so the shop ladder always shows the next tier.
+-- Two per rarity tier, plus a third Mythic, so the shop ladder always
+-- shows the next tier.
 BrainrotData.CHARACTERS = {
 	{ name = "Sir Quacksalot", rarity = 1, cost = 25, baseRate = 1, body = Color3.fromRGB(255, 220, 60), head = Color3.fromRGB(255, 240, 150), quirk = "A duck in a top hat who quacks in Latin." },
 	{ name = "Noodle Wizard", rarity = 1, cost = 50, baseRate = 2, body = Color3.fromRGB(240, 200, 120), head = Color3.fromRGB(255, 230, 180), quirk = "Casts spells with wet spaghetti." },
@@ -39,6 +40,7 @@ BrainrotData.CHARACTERS = {
 	{ name = "Grandma Rocket", rarity = 4, cost = 4000, baseRate = 100, body = Color3.fromRGB(200, 60, 60), head = Color3.fromRGB(255, 200, 200), quirk = "Launches herself to bingo night." },
 	{ name = "Toilet Tornado", rarity = 4, cost = 7000, baseRate = 160, body = Color3.fromRGB(230, 240, 255), head = Color3.fromRGB(255, 255, 255), quirk = "Spins. Flushes. Repeats." },
 	{ name = "CEO of Naps", rarity = 5, cost = 20000, baseRate = 400, body = Color3.fromRGB(120, 90, 200), head = Color3.fromRGB(180, 150, 240), quirk = "Runs a Fortune 500 company asleep." },
+	{ name = "The Last Brain Cell", rarity = 5, cost = 28000, baseRate = 550, body = Color3.fromRGB(90, 60, 160), head = Color3.fromRGB(200, 170, 255), quirk = "The final brain cell. It unionized." },
 	{ name = "Infinite Sandwich", rarity = 5, cost = 35000, baseRate = 650, body = Color3.fromRGB(220, 180, 120), head = Color3.fromRGB(255, 220, 160), quirk = "Every bite grows a new layer." },
 	{ name = "The Algorithm", rarity = 6, cost = 100000, baseRate = 2000, body = Color3.fromRGB(40, 40, 60), head = Color3.fromRGB(90, 220, 255), quirk = "It knows what you will buy next." },
 	{ name = "Skibidi Supreme", rarity = 6, cost = 250000, baseRate = 5000, body = Color3.fromRGB(255, 255, 255), head = Color3.fromRGB(255, 255, 255), quirk = "The final boss of brainrot." },
