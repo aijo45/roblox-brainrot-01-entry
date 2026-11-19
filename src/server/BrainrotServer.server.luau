@@ -878,6 +878,30 @@ RunService.Heartbeat:Connect(function(dt)
 			model:Destroy()
 		else
 			model:PivotTo(CFrame.new(cf.Position.X, cf.Position.Y, nextZ))
+			-- Proximity buy: Touched on a CFrame-moved anchored part is
+			-- unreliable as the only buy path, so a player standing close
+			-- to a walker buys it too. Same 0.5s cooldown as the touch
+			-- path; buyWalker itself guards against double-buy because
+			-- walkers[model] is nilled the moment a buy goes through.
+			if tick() >= entry.cooldown then
+				for player, state in pairs(playerState) do
+					if state and not state.carrying and walkers[model] then
+						local character = player.Character
+						local root = character and character:FindFirstChild("HumanoidRootPart")
+						if root then
+							local dx = cf.Position.X - root.Position.X
+							local dz = nextZ - root.Position.Z
+							if dx * dx + dz * dz < 25 then
+								entry.cooldown = tick() + 0.5
+								buyWalker(player, model, entry)
+								if not walkers[model] then
+									break
+								end
+							end
+						end
+					end
+				end
+			end
 		end
 	end
 	for player, state in pairs(playerState) do
