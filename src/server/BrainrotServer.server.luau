@@ -18,6 +18,7 @@ local BrainrotData = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChi
 -- Tuning -----------------------------------------------------------------
 local SPAWN_EVERY = 4 -- seconds between conveyor spawns
 local WALK_SPEED = 6 -- studs per second along the conveyor
+local PROXIMITY_BUY_STUDS = 5 -- buy range: standing this close to a walker buys it
 local CONVEYOR_HALF = 105 -- brainrots despawn past z = +/-105
 local WALKER_MAX = 8
 local WAVE_EVERY = 100 -- seconds between Meme Waves
@@ -878,25 +879,25 @@ RunService.Heartbeat:Connect(function(dt)
 			model:Destroy()
 		else
 			model:PivotTo(CFrame.new(cf.Position.X, cf.Position.Y, nextZ))
-			-- Proximity buy: Touched on a CFrame-moved anchored part is
-			-- unreliable as the only buy path, so a player standing close
-			-- to a walker buys it too. Same 0.5s cooldown as the touch
-			-- path; buyWalker itself guards against double-buy because
-			-- walkers[model] is nilled the moment a buy goes through.
-			if tick() >= entry.cooldown then
-				for player, state in pairs(playerState) do
-					if state and not state.carrying and walkers[model] then
-						local character = player.Character
-						local root = character and character:FindFirstChild("HumanoidRootPart")
-						if root then
-							local dx = cf.Position.X - root.Position.X
-							local dz = nextZ - root.Position.Z
-							if dx * dx + dz * dz < 25 then
-								entry.cooldown = tick() + 0.5
-								buyWalker(player, model, entry)
-								if not walkers[model] then
-									break
-								end
+			-- Close-range purchase: standing next to a walker buys it,
+			-- no physics touch needed. Touch events are flaky for an
+			-- anchored part re-positioned by CFrame every Heartbeat,
+			-- so distance is the reliable trigger. buyWalker clears
+			-- walkers[model] on a successful buy, which ends the scan.
+			local buyRangeSq = PROXIMITY_BUY_STUDS * PROXIMITY_BUY_STUDS
+			local ready = tick() >= entry.cooldown
+			if ready then
+				for player in pairs(playerState) do
+					local state = playerState[player]
+					if state and state.carrying == nil and walkers[model] then
+						local hero = player.Character
+						local rootPart = hero and hero:FindFirstChild("HumanoidRootPart")
+						if rootPart then
+							local wx = cf.Position.X - rootPart.Position.X
+							local wz = nextZ - rootPart.Position.Z
+							if wx * wx + wz * wz < buyRangeSq then
+								entry.cooldown = tick() + 0.5 -- same gap as the touch path
+								buyWalker(player, model, entry) -- hands the walker to the buyer
 							end
 						end
 					end
